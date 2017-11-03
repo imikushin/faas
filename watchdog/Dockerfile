@@ -1,10 +1,12 @@
-FROM golang:1.8.5
+FROM golang:1.9.2
 RUN mkdir -p /go/src/github.com/openfaas/faas/watchdog
 WORKDIR /go/src/github.com/openfaas/faas/watchdog
 
 COPY main.go        .
 COPY readconfig.go  .
 COPY config_test.go .
+COPY main_test.go   .
+COPY test-faas-proc.sh .
 COPY requesthandler_test.go .
 #COPY fastForkRequestHandler.go  .
 #COPY requestHandler.go   .

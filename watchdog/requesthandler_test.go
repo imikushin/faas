@@ -246,7 +246,7 @@ func TestHandler_StatusMethodNotAllowed_ForUnknown(t *testing.T) {
 func TestHandler_StatusOKForGETAndNoBody(t *testing.T) {
 	rr := httptest.NewRecorder()
 
-	req, err := http.NewRequest("GET", "/", nil)
+	req, err := http.NewRequest("GET", "/", &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}

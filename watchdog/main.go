@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -19,21 +20,10 @@ import (
 	"github.com/openfaas/faas/watchdog/types"
 )
 
-// buildFunctionInput for a GET method this is an empty byte array.
 func buildFunctionInput(config *WatchdogConfig, r *http.Request) ([]byte, error) {
 	var res []byte
 	var requestBytes []byte
 	var err error
-
-	if r.Body == nil {
-		return res, nil
-	}
-	defer r.Body.Close()
-
-	if err != nil {
-		log.Println(err)
-		return res, err
-	}
 
 	requestBytes, err = ioutil.ReadAll(r.Body)
 	if config.marshalRequest {
@@ -43,7 +33,6 @@ func buildFunctionInput(config *WatchdogConfig, r *http.Request) ([]byte, error)
 	} else {
 		res = requestBytes
 	}
-
 	return res, err
 }
 
@@ -60,8 +49,6 @@ type requestInfo struct {
 func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request, method string) {
 	startTime := time.Now()
 
-	parts := strings.Split(config.faasProcess, " ")
-
 	ri := &requestInfo{}
 
 	if config.debugHeaders {
@@ -70,23 +57,12 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 
 	log.Println("Forking fprocess.")
 
-	targetCmd := exec.Command(parts[0], parts[1:]...)
-
-	envs := getAdditionalEnvs(config, r, method)
-	if len(envs) > 0 {
+	targetCmd := faasProcCmd(config.faasProcess)
+	if envs := getAdditionalEnvs(config, r, method); len(envs) > 0 {
 		targetCmd.Env = envs
 	}
 
-	writer, _ := targetCmd.StdinPipe()
-
-	var out []byte
-	var err error
 	var requestBody []byte
-
-	var wg sync.WaitGroup
-
-	wgCount := 2
-
 	var buildInputErr error
 	requestBody, buildInputErr = buildFunctionInput(config, r)
 	if buildInputErr != nil {
@@ -97,12 +73,10 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 
 		// Verbose message - i.e. stack trace
 		w.Write([]byte("\n"))
-		w.Write(out)
+		w.Write(nil)
 
 		return
 	}
-
-	wg.Add(wgCount)
 
 	var timer *time.Timer
 
@@ -126,20 +100,8 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 		}()
 	}
 
-	// Write to pipe in separate go-routine to prevent blocking
-	go func() {
-		defer wg.Done()
-		writer.Write(requestBody)
-		writer.Close()
-	}()
+	outBytes, errBytes, err := runFaasProc(targetCmd, requestBody)
 
-	// Read the output from stdout/stderr and combine into one variable for output.
-	go func() {
-		defer wg.Done()
-		out, err = targetCmd.CombinedOutput()
-	}()
-
-	wg.Wait()
 	if timer != nil {
 		timer.Stop()
 	}
@@ -147,7 +109,7 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		if config.writeDebug == true {
 			log.Printf("Success=%t, Error=%s\n", targetCmd.ProcessState.Success(), err.Error())
-			log.Printf("Out=%s\n", out)
+			log.Printf("Out=%s\n", outBytes)
 		}
 
 		if ri.headerWritten == false {
@@ -155,8 +117,8 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 			response := bytes.NewBufferString(err.Error())
 			w.Write(response.Bytes())
 			w.Write([]byte("\n"))
-			if len(out) > 0 {
-				w.Write(out)
+			if len(outBytes) > 0 {
+				w.Write(outBytes)
 			}
 			ri.headerWritten = true
 		}
@@ -165,9 +127,9 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 
 	var bytesWritten string
 	if config.writeDebug == true {
-		os.Stdout.Write(out)
+		os.Stdout.Write(outBytes)
 	} else {
-		bytesWritten = fmt.Sprintf("Wrote %d Bytes", len(out))
+		bytesWritten = fmt.Sprintf("Wrote %d Bytes", len(outBytes))
 	}
 
 	if len(config.contentType) > 0 {
@@ -184,9 +146,15 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 	execTime := time.Since(startTime).Seconds()
 	if ri.headerWritten == false {
 		w.Header().Set("X-Duration-Seconds", fmt.Sprintf("%f", execTime))
+
+		stdErrB64 := new(bytes.Buffer)
+		b64 := base64.NewEncoder(base64.StdEncoding, stdErrB64)
+		b64.Write(errBytes)
+		b64.Close()
+		w.Header().Set("X-Stderr", stdErrB64.String())
+
 		ri.headerWritten = true
-		w.WriteHeader(200)
-		w.Write(out)
+		w.Write(outBytes)
 	}
 
 	if config.debugHeaders {
@@ -198,6 +166,86 @@ func pipeRequest(config *WatchdogConfig, w http.ResponseWriter, r *http.Request,
 	} else {
 		log.Printf("Duration: %f seconds", execTime)
 	}
+}
+
+func faasProcCmd(faasProcess string) *exec.Cmd {
+	parts := strings.Split(faasProcess, " ")
+	return exec.Command(parts[0], parts[1:]...)
+}
+
+func runFaasProc(targetCmd *exec.Cmd, requestBody []byte) ([]byte, []byte, error) {
+
+	stdin, _ := targetCmd.StdinPipe()
+	stdout, _ := targetCmd.StdoutPipe()
+	stderr, _ := targetCmd.StderrPipe()
+
+	var outBytes, errBytes []byte
+	var err error
+
+	errChan := make(chan error)
+	var errWG sync.WaitGroup
+
+	defer errWG.Wait()
+	defer close(errChan)
+
+	errWG.Add(1)
+	go func() {
+		defer errWG.Done()
+		for e := range errChan {
+			if err == nil {
+				err = e
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+
+	// Only write body if this is appropriate for the method.
+	if requestBody != nil {
+		// Write to pipe in separate go-routine to prevent blocking
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer stdin.Close()
+			if _, err := stdin.Write(requestBody); err != nil {
+				errChan <- err
+			}
+		}()
+	} else {
+		stdin.Close()
+	}
+
+	if err := targetCmd.Start(); err != nil {
+		errChan <- err
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if bs, err := ioutil.ReadAll(stdout); err != nil {
+			errChan <- err
+		} else {
+			outBytes = bs
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if bs, err := ioutil.ReadAll(stderr); err != nil {
+			errChan <- err
+		} else {
+			errBytes = bs
+		}
+	}()
+
+	wg.Wait()
+
+	if err := targetCmd.Wait(); err != nil {
+		errChan <- err
+	}
+
+	return outBytes, errBytes, err
 }
 
 func getAdditionalEnvs(config *WatchdogConfig, r *http.Request, method string) []string {
@@ -282,6 +330,5 @@ func main() {
 	} else {
 		log.Println("Warning: \"suppress_lock\" is enabled. No automated health-checks will be in place for your function.")
 	}
-
 	log.Fatal(s.ListenAndServe())
 }
