@@ -134,11 +134,11 @@ func TestRead_EmptyTimeoutConfig(t *testing.T) {
 
 	config := readConfig.Read(defaults)
 
-	if (config.readTimeout) != time.Duration(5)*time.Second {
+	if (config.readTimeout) != DefaultReadTimeout {
 		t.Log("readTimeout incorrect")
 		t.Fail()
 	}
-	if (config.writeTimeout) != time.Duration(5)*time.Second {
+	if (config.writeTimeout) != DefaultWriteTimeout {
 		t.Log("writeTimeout incorrect")
 		t.Fail()
 	}

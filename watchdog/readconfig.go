@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+const (
+	DefaultReadTimeout  = 5 * time.Minute
+	DefaultWriteTimeout = 5 * time.Minute
+)
+
 // HasEnv provides interface for os.Getenv
 type HasEnv interface {
 	Getenv(key string) string
@@ -54,16 +59,15 @@ func (ReadConfig) Read(hasEnv HasEnv) WatchdogConfig {
 
 	cfg.execTimeout = time.Duration(parseIntValue(hasEnv.Getenv("exec_timeout"))) * time.Second
 
-	if readTimeout == 0 {
-		readTimeout = 5
-	}
-
-	if writeTimeout == 0 {
-		writeTimeout = 5
-	}
-
 	cfg.readTimeout = time.Duration(readTimeout) * time.Second
 	cfg.writeTimeout = time.Duration(writeTimeout) * time.Second
+
+	if cfg.readTimeout == 0 {
+		cfg.readTimeout = DefaultReadTimeout
+	}
+	if cfg.writeTimeout == 0 {
+		cfg.writeTimeout = DefaultWriteTimeout
+	}
 
 	writeDebugEnv := hasEnv.Getenv("write_debug")
 	if isBoolValueSet(writeDebugEnv) {
